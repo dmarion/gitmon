@@ -1,0 +1,11 @@
+repos = [
+  "https://github.com/dmarion/gitmon.git",
+]
+
+from = "your_email@gmail.com"
+to = "recipient@example.com"
+token = "your_gmail_app_password"
+
+template_path = "template.html"
+cache_dir = "/tmp/gitmon"
+max_commits = 100
