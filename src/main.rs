@@ -22,8 +22,8 @@ struct Args {
     #[arg(short, long)]
     verbose: bool,
 
-    #[arg(short, long, default_value = "config.toml")]
-    config: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
 
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -224,10 +224,24 @@ fn send_email(
     Ok(())
 }
 
-fn load_config(path: &PathBuf) -> Config {
-    let content = fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("Failed to read config file at {:?}", path));
-    toml::from_str(&content).expect("Failed to parse config TOML")
+fn load_config(provided_path: Option<&PathBuf>) -> Config {
+    let resolved_path = if let Some(path) = provided_path {
+        path.clone()
+    } else {
+        let base_dir = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = dirs::home_dir().expect("Could not determine home directory");
+                home.join(".config")
+            });
+        base_dir.join("gitmon").join("config.toml")
+    };
+
+    let content = std::fs::read_to_string(&resolved_path)
+        .unwrap_or_else(|_| panic!("Failed to read config file at {:?}", resolved_path));
+
+    toml::from_str(&content)
+        .unwrap_or_else(|e| panic!("Failed to parse config TOML at {:?}: {}", resolved_path, e))
 }
 
 fn main() {
@@ -241,7 +255,8 @@ fn main() {
         env_logger::init();
     }
 
-    let config = load_config(&args.config);
+    let config = load_config(args.config.as_ref());
+
     let base_cache_dir = config
         .cache_dir
         .map(PathBuf::from)
