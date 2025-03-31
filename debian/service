@@ -1,0 +1,6 @@
+[Unit]
+Description=gitmon
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/gitmon --config /etc/gitmon/config.toml
