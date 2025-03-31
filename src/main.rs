@@ -259,7 +259,18 @@ fn main() {
 
     let base_cache_dir = config
         .cache_dir
-        .map(PathBuf::from)
+        .map(|p| {
+            let p = if p.starts_with("~") {
+                if let Some(home) = dirs::home_dir() {
+                    PathBuf::from(p.replacen("~", home.to_str().unwrap_or(""), 1))
+                } else {
+                    PathBuf::from(p)
+                }
+            } else {
+                PathBuf::from(p)
+            };
+            p
+        })
         .or_else(|| dirs::cache_dir().map(|p| p.join("gitmon")))
         .expect("Could not determine cache directory");
 
