@@ -50,6 +50,7 @@ struct CommitInfo {
     date: String,
     author: String,
     message: String,
+    change_id: Option<String>,
 }
 
 fn load_state(path: &PathBuf) -> State {
@@ -137,15 +138,37 @@ fn get_new_commits_since(
             .unwrap()
             .with_timezone(&chrono::Local);
 
+        let mut change_id: Option<String> = None;
+        for line in commit.message().unwrap_or("").lines() {
+            if let Some(stripped) = line.strip_prefix("Change-Id:") {
+                change_id = Some(stripped.trim().to_string());
+                break;
+            }
+        }
+
         commits.push(CommitInfo {
             id: id_str,
             date: dt.format("%Y-%m-%d %H:%M:%S").to_string(),
             author: commit.author().name().unwrap_or("Unknown").to_string(),
             message: commit.summary().unwrap_or("").to_string(),
+            change_id: change_id,
         });
     }
 
     Ok(commits)
+}
+
+fn trim_after_domain(url: &str) -> &str {
+    let url_no_scheme = if let Some(pos) = url.find("://") {
+        &url[pos + 3..]
+    } else {
+        url
+    };
+
+    match url_no_scheme.find('/') {
+        Some(pos) => &url[..pos + (url.len() - url_no_scheme.len())],
+        None => url,
+    }
 }
 
 fn build_html_report_with_template(
@@ -169,8 +192,12 @@ fn build_html_report_with_template(
                 format!("{}/-/commit/{}.patch", repo.trim_end_matches(".git"), c.id)
             } else if repo.contains("bitbucket.org") {
                 format!("{}/commits/{}.patch", repo.trim_end_matches(".git"), c.id)
-            } else if repo.contains("gerrit") {
-                format!("{}/a/commit/{}.patch", repo.trim_end_matches(".git"), c.id)
+            } else if repo.contains("gerrit") && c.change_id.is_some() {
+                format!(
+                    "{}/r/q/{}",
+                    trim_after_domain(repo.trim_end_matches(".git")),
+                    c.change_id.as_ref().unwrap()
+                )
             } else {
                 c.id.clone()
             };
