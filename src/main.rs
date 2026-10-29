@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::process::Command;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     path::PathBuf,
 };
@@ -30,8 +30,34 @@ struct Args {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RepoEntry {
+    Url(String),
+    Config {
+        url: String,
+        branches: Option<Vec<String>>,
+    },
+}
+
+impl RepoEntry {
+    fn url(&self) -> &str {
+        match self {
+            RepoEntry::Url(u) => u,
+            RepoEntry::Config { url, .. } => url,
+        }
+    }
+
+    fn branches(&self) -> Option<&[String]> {
+        match self {
+            RepoEntry::Url(_) => None,
+            RepoEntry::Config { branches, .. } => branches.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct Config {
-    repos: Vec<String>,
+    repos: Vec<RepoEntry>,
     from: String,
     to: String,
     token: String,
@@ -51,6 +77,12 @@ struct CommitInfo {
     author: String,
     message: String,
     change_id: Option<String>,
+}
+
+struct RepoReport {
+    url: String,
+    branch: String,
+    commits: Vec<CommitInfo>,
 }
 
 fn load_state(path: &PathBuf) -> State {
@@ -82,21 +114,22 @@ fn clone_or_update_repo(
     let repo_dir = base_cache_dir.join(repo_hash);
 
     if repo_dir.exists() {
-        debug!("Pulling updates for {}", remote_url);
+        debug!("Fetching updates for {}", remote_url);
         let output = Command::new("git")
             .arg("-C")
             .arg(&repo_dir)
-            .arg("pull")
+            .arg("fetch")
+            .arg("--all")
             .output();
 
         match output {
             Ok(out) if out.status.success() => debug!("Updated {}", remote_url),
             Ok(out) => eprintln!(
-                "Git pull failed: {}\n{}",
+                "Git fetch failed: {}\n{}",
                 remote_url,
                 String::from_utf8_lossy(&out.stderr)
             ),
-            Err(e) => eprintln!("Git pull error on {}: {}", remote_url, e),
+            Err(e) => eprintln!("Git fetch error on {}: {}", remote_url, e),
         }
 
         Ok(repo_dir)
@@ -107,14 +140,34 @@ fn clone_or_update_repo(
     }
 }
 
+fn get_all_remote_branches(repo_path: &PathBuf) -> Result<Vec<String>, git2::Error> {
+    let repo = Repository::open(repo_path)?;
+    let mut branches = Vec::new();
+
+    for reference in repo.references_glob("refs/remotes/origin/*")? {
+        let reference = reference?;
+        if let Some(name) = reference.shorthand() {
+            // name is like "origin/main" — strip the "origin/" prefix
+            if let Some(branch) = name.strip_prefix("origin/") {
+                if branch != "HEAD" {
+                    branches.push(branch.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(branches)
+}
+
 fn get_new_commits_since(
     repo_path: &PathBuf,
+    branch: &str,
     last_seen: Option<&str>,
     max_commits: Option<usize>,
 ) -> Result<Vec<CommitInfo>, git2::Error> {
     let repo = Repository::open(repo_path)?;
     let mut revwalk = repo.revwalk()?;
-    revwalk.push_head()?;
+    revwalk.push_ref(&format!("refs/remotes/origin/{}", branch))?;
     revwalk.set_sorting(git2::Sort::TIME)?;
 
     let mut commits = Vec::new();
@@ -172,30 +225,32 @@ fn trim_after_domain(url: &str) -> &str {
 }
 
 fn build_html_report_with_template(
-    repo_commits: &HashMap<String, Vec<CommitInfo>>,
+    reports: &[RepoReport],
     template_path: Option<&str>,
 ) -> String {
     let mut tables = String::new();
 
-    for (repo, commits) in repo_commits {
-        if commits.is_empty() {
+    for report in reports {
+        if report.commits.is_empty() {
             continue;
         }
+        let heading = format!("{} [{}]", report.url, report.branch);
+        let url = &report.url;
         tables.push_str(&format!(
             "<h2>Repository: {}</h2><table border=\"1\"><tr><th>ID</th><th>Date</th><th>Author</th><th>Message</th></tr>",
-            repo
+            heading
         ));
-        for c in commits {
-            let patch_url = if repo.contains("github.com") {
-                format!("{}/commit/{}", repo.trim_end_matches(".git"), c.id)
-            } else if repo.contains("gitlab.com") {
-                format!("{}/-/commit/{}.patch", repo.trim_end_matches(".git"), c.id)
-            } else if repo.contains("bitbucket.org") {
-                format!("{}/commits/{}.patch", repo.trim_end_matches(".git"), c.id)
-            } else if repo.contains("gerrit") && c.change_id.is_some() {
+        for c in &report.commits {
+            let patch_url = if url.contains("github.com") {
+                format!("{}/commit/{}", url.trim_end_matches(".git"), c.id)
+            } else if url.contains("gitlab.com") {
+                format!("{}/-/commit/{}.patch", url.trim_end_matches(".git"), c.id)
+            } else if url.contains("bitbucket.org") {
+                format!("{}/commits/{}.patch", url.trim_end_matches(".git"), c.id)
+            } else if url.contains("gerrit") && c.change_id.is_some() {
                 format!(
                     "{}/r/q/{}",
-                    trim_after_domain(repo.trim_end_matches(".git")),
+                    trim_after_domain(url.trim_end_matches(".git")),
                     c.change_id.as_ref().unwrap()
                 )
             } else {
@@ -306,34 +361,48 @@ fn main() {
     let state_file = base_cache_dir.join("state.json");
     let mut state = load_state(&state_file);
 
-    let mut repo_commits = HashMap::new();
+    let mut reports: Vec<RepoReport> = Vec::new();
 
-    for remote_url in &config.repos {
-        debug!("Checking remote repo: {}", remote_url);
-        match clone_or_update_repo(remote_url, &base_cache_dir) {
+    for repo_entry in &config.repos {
+        let url = repo_entry.url();
+        debug!("Checking remote repo: {}", url);
+        match clone_or_update_repo(url, &base_cache_dir) {
             Ok(local_path) => {
-                let last_seen_id = state.last_seen.get(remote_url).cloned();
-                match get_new_commits_since(
-                    &local_path,
-                    last_seen_id.as_deref(),
-                    config.max_commits,
-                ) {
-                    Ok(commits) if !commits.is_empty() => {
-                        state
-                            .last_seen
-                            .insert(remote_url.clone(), commits[0].id.clone());
-                        repo_commits.insert(remote_url.clone(), commits);
+                let branches = repo_entry
+                    .branches()
+                    .map(|b| b.to_vec())
+                    .unwrap_or_else(|| {
+                        get_all_remote_branches(&local_path).unwrap_or_default()
+                    });
+
+                for branch in &branches {
+                    let state_key = format!("{}::{}", url, branch);
+                    let last_seen_id = state.last_seen.get(&state_key).cloned();
+                    match get_new_commits_since(
+                        &local_path,
+                        branch,
+                        last_seen_id.as_deref(),
+                        config.max_commits,
+                    ) {
+                        Ok(commits) if !commits.is_empty() => {
+                            state.last_seen.insert(state_key, commits[0].id.clone());
+                            reports.push(RepoReport {
+                                url: url.to_string(),
+                                branch: branch.clone(),
+                                commits,
+                            });
+                        }
+                        Ok(_) => info!("No new commits in {} [{}]", url, branch),
+                        Err(e) => eprintln!("Failed to read commits from {} [{}]: {}", url, branch, e),
                     }
-                    Ok(_) => info!("No new commits in {}", remote_url),
-                    Err(e) => eprintln!("Failed to read commits from {}: {}", remote_url, e),
                 }
             }
-            Err(e) => eprintln!("Failed to prepare repo {}: {}", remote_url, e),
+            Err(e) => eprintln!("Failed to prepare repo {}: {}", url, e),
         }
     }
 
-    if !repo_commits.is_empty() {
-        let html = build_html_report_with_template(&repo_commits, config.template_path.as_deref());
+    if !reports.is_empty() {
+        let html = build_html_report_with_template(&reports, config.template_path.as_deref());
 
         if let Some(output_path) = args.output {
             match fs::write(&output_path, &html) {
