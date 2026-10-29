@@ -71,6 +71,7 @@ struct State {
     last_seen: BTreeMap<String, String>,
 }
 
+#[derive(Clone)]
 struct CommitInfo {
     id: String,
     date: String,
@@ -79,6 +80,7 @@ struct CommitInfo {
     change_id: Option<String>,
 }
 
+#[derive(Clone)]
 struct RepoReport {
     url: String,
     branch: String,
@@ -285,6 +287,7 @@ fn build_html_report_with_template(
 
 fn send_email(
     html_body: String,
+    subject: &str,
     from: &str,
     to: &str,
     token: &str,
@@ -292,7 +295,7 @@ fn send_email(
     let email = Message::builder()
         .from(from.parse::<Mailbox>()?)
         .to(to.parse::<Mailbox>()?)
-        .subject("Git Commit Notification")
+        .subject(subject)
         .header(ContentType::TEXT_HTML)
         .body(html_body)?;
 
@@ -402,17 +405,31 @@ fn main() {
     }
 
     if !reports.is_empty() {
-        let html = build_html_report_with_template(&reports, config.template_path.as_deref());
-
-        if let Some(output_path) = args.output {
-            match fs::write(&output_path, &html) {
-                Ok(_) => info!("Report written to {:?}", output_path),
-                Err(e) => eprintln!("Failed to write report: {}", e),
+        // Group reports by repo URL, preserving config order
+        let mut seen_urls: Vec<&str> = Vec::new();
+        for r in &reports {
+            if !seen_urls.contains(&r.url.as_str()) {
+                seen_urls.push(&r.url);
             }
-        } else {
-            match send_email(html, &config.from, &config.to, &config.token) {
-                Ok(_) => info!("Email sent successfully."),
-                Err(e) => eprintln!("Failed to send email: {}", e),
+        }
+
+        for url in seen_urls {
+            let repo_reports: Vec<RepoReport> =
+                reports.iter().filter(|r| r.url == url).cloned().collect();
+            let repo_name = url.trim_end_matches(".git").rsplit('/').next().unwrap_or(url);
+            let subject = format!("gitmon: {}", repo_name);
+            let html = build_html_report_with_template(&repo_reports, config.template_path.as_deref());
+
+            if let Some(ref output_path) = args.output {
+                match fs::write(output_path, &html) {
+                    Ok(_) => info!("Report written to {:?}", output_path),
+                    Err(e) => eprintln!("Failed to write report: {}", e),
+                }
+            } else {
+                match send_email(html, &subject, &config.from, &config.to, &config.token) {
+                    Ok(_) => info!("Email sent for {}.", url),
+                    Err(e) => eprintln!("Failed to send email for {}: {}", url, e),
+                }
             }
         }
 
