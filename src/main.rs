@@ -232,15 +232,34 @@ fn build_html_report_with_template(
 ) -> String {
     let mut tables = String::new();
 
+    let url = match reports.first() {
+        Some(r) => &r.url,
+        None => return String::new(),
+    };
+
+    // Repo heading
+    tables.push_str(&format!("<h1>Repository: {}</h1>", url));
+
+    // Summary table
+    tables.push_str("<h2>Summary</h2><table border=\"1\"><tr><th>Branch</th><th>Commits</th></tr>");
+    for report in reports {
+        tables.push_str(&format!(
+            "<tr><td><a href=\"#branch-{}\">{}</a></td><td>{}</td></tr>",
+            report.branch,
+            report.branch,
+            report.commits.len()
+        ));
+    }
+    tables.push_str("</table>");
+
+    // Per-branch detail
     for report in reports {
         if report.commits.is_empty() {
             continue;
         }
-        let heading = format!("{} [{}]", report.url, report.branch);
-        let url = &report.url;
         tables.push_str(&format!(
-            "<h2>Repository: {}</h2><table border=\"1\"><tr><th>ID</th><th>Date</th><th>Author</th><th>Message</th></tr>",
-            heading
+            "<h2 id=\"branch-{}\">Branch: {}</h2><table border=\"1\"><tr><th>ID</th><th>Date</th><th>Author</th><th>Message</th></tr>",
+            report.branch, report.branch
         ));
         for c in &report.commits {
             let patch_url = if url.contains("github.com") {
